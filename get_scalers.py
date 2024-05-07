@@ -1,0 +1,158 @@
+import re
+import cgi
+import psycopg2
+import sys
+import argparse
+from datetime import datetime
+import ROOT
+from ROOT import TString
+from array import array
+
+parser = argparse.ArgumentParser(description='get runrange')
+parser.add_argument('--first',action="store",dest='first',default=-1)
+parser.add_argument('--last',action="store",dest='last',default=-1)
+parser.add_argument('--run',action="store",dest='run',default=-1)
+parser.add_argument('--tag',action="store",dest='tag',default="")
+args = parser.parse_args()
+firstrun = int(args.first)
+lastrun = int(args.last)
+run = int(args.run)
+nametag=args.tag
+if firstrun > lastrun:
+    print("lastrun can't be less than firstrun!")
+    quit()
+
+
+db_params = {
+        'dbname': 'daq',
+        'user': 'phnxro',
+        'host': 'db1.sphenix.bnl.gov'
+        }
+
+conn = psycopg2.connect(**db_params)
+cursor = conn.cursor()
+hists = []
+
+def write_entries_to_ttree(entries,runtime,runnumber,filetouse):
+    print(runnumber)
+    the_tfile = filetouse
+    the_ttree = ROOT.TTree("ttree"+str(runnumber),"ttree"+str(runnumber))
+    index  = array('Q',[0])
+    name = TString()
+    raw = array('Q',[0])
+    live = array('Q',[0])
+    scaled = array('Q',[0])
+    rawrate = array('d',[0])
+    liverate = array('d',[0])
+    scaledrate = array('d',[0])
+    livetime = array('d',[0])
+    runn = array('Q',[0])
+    runn[0] = runnumber
+    the_ttree.Branch("runn",runn,"runn/l")
+    the_ttree.Branch("name",name,"name/S")
+    the_ttree.Branch("index",index,"index/l")
+    the_ttree.Branch("raw",raw,"raw/l")
+    the_ttree.Branch("live",live,"live/l")
+    the_ttree.Branch("scaled",scaled,"scaled/l")
+    the_ttree.Branch("rawrate",rawrate,"rawrate/D")
+    the_ttree.Branch("liverate",liverate,"liverate/D")
+    the_ttree.Branch("scaledrate",scaledrate,"scaledrate/D")
+    the_ttree.Branch("livetime",livetime,"livetime/D")
+    for i in range(len(entries)):
+        index[0] = int(entries[i][0])
+        name = entries[i][1]
+        raw[0] = int(entries[i][2])
+        live[0] = int(entries[i][3])
+        scaled[0] = int(entries[i][4])
+        rawrate[0] = float(entries[i][2])/runtime
+        liverate[0] = float(entries[i][3])/runtime
+        scaledrate[0] = float(entries[i][4])/runtime
+        livetime[0] = float(entries[i][3])/float(entries[i][2])
+        the_ttree.Fill()
+    the_ttree.Write()
+    
+def print_entries(entries,runtime):
+    print()
+    print("index    | name                         | raw triggers     | live triggers    | scaled triggers  | raw rate      | live rate      | scaled rate  | livetime  ")
+    print("-------------------------------------------------------------------------------------------------------------------------------------------------------------")
+    for entry in entries:
+        print('{:9s}|{:30s}|{:18s}|{:18s}|{:18s}| {:<14.0f}| {:<15.0f}| {:<13.0f}| {:<3.2f}'.format(entry[0],entry[1],entry[2],entry[3],entry[4],int(entry[2])/runtime,int(entry[3])/runtime,int(entry[4])/runtime,float(entry[3])/float(entry[2])))
+
+
+def process_query(runnumber,thetfile):
+    entries = []
+    command  = "SELECT S.index,T.triggername,S.raw,S.live,S.scaled "
+    command += "FROM gl1_scalers S "
+    command += "INNER JOIN gl1_triggernames T ON S.index = T.index "
+    command += "WHERE " + str(runnumber) + " BETWEEN T.runnumber AND T.runnumber_last "
+    command += "AND S.runnumber = " + str(runnumber) + " "
+    command += "ORDER BY index"
+    cursor.execute(command)
+    for entry in cursor.fetchall():
+        entry = re.split('(?<!>= 1),\s*',str(entry).replace('(','').replace(')',''))
+        entries.append(entry)
+    cursor.execute("SELECT brtimestamp,ertimestamp FROM run WHERE runnumber = " + str(runnumber))
+    entry = cursor.fetchone()
+    a = str(entry).replace('(','').replace(')','').replace('datetime.datetime','').split(',')
+    try:
+        a = [int(val) for val in a]
+    except:
+        print()
+        print("empty value encountered")
+        return
+    b = []
+    c = []
+    useb = False
+    usec = False
+
+    #if the datetime object ended with seconds of 00, we have to modify the array to handle that
+    for i in a:
+        # 2000 just to make sure it's a year. Won't use 2024 so this still works next year
+        if int(i) > 2000 and useb: usec = True; useb = False
+        if int(i) > 2000 and not useb and not usec: useb = True
+        if useb: b.append(i)
+        if usec: c.append(i)
+            
+    if len(b) == 5: starttime = datetime(b[0],b[1],b[2],b[3],b[4])
+    elif len(b) == 6: starttime = datetime(b[0],b[1],b[2],b[3],b[4],b[5])
+    else: starttime=0 
+    if len(c) == 5: endtime = datetime(c[0],c[1],c[2],c[3],c[4])
+    elif len(c) == 6: endtime = datetime(c[0],c[1],c[2],c[3],c[4],c[5])
+    else: endtime=0
+    
+    runtime = (endtime-starttime).total_seconds()
+    print_entries(entries,float(runtime))
+    write_entries_to_ttree(entries,float(runtime),runnumber,thetfile)
+
+the_tfile = ROOT.TFile("triggers_"+nametag+".root","recreate")
+if run == -1:
+    the_ttree = ROOT.TTree("ttree_runrange","ttree_runrange")
+    runup = array('Q',[0])
+    runup[0] = lastrun
+    the_ttree.Branch("runup",runup,"runup/l")
+    runlo = array('Q',[0])
+    runlo[0] = firstrun
+    the_ttree.Branch("runlo",runlo,"runlo/l")
+    the_ttree.Fill()
+    the_tfile.Write()
+    command = "select runnumber from gtm where vgtm=4 and global=true and runnumber<="+str(lastrun)+" and runnumber>="+str(firstrun)
+    cursor.execute(command)
+    runs=cursor.fetchall()
+    print(runs)
+    for runnum in runs:
+        process_query(int(runnum[0]),the_tfile)
+else:
+    the_ttree = ROOT.TTree("ttree_runrage","ttree_runrange")
+    runup = array('Q',[0])
+    runup[0] = run
+    the_ttree.Branch("runup",runup,"runup/l")
+    runlo = array('Q',[0])
+    runn[0] = run
+    the_ttree.Branch("runlo",runlo,"runlo/l")
+    the_ttree.Fill()
+    the_tfile.Write()
+    process_query(run,the_tfile)
+
+cursor.close()
+conn.close()
+

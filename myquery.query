@@ -1,0 +1,1 @@
+select runnumber, brtimestamp from run where brtimestamp between '2024-05-01' and '2024-05-08' order by run asc;
